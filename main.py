@@ -1,9 +1,10 @@
+import os
 import yfinance as yf
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===== ISI PUNYA KAMU =====
-TOKEN = "9279643241:AAHYasJZm9DLdp5C7FrTdPvoEGlvrKfOdgg"
+TOKEN = os.environ.get("9279643241:AAEWgaSklQYwV7ujc54nknfuxfLOFewPib0")
 CHAT_ID = 6194508570
 # ==========================
 
