@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===== ISI PUNYA KAMU =====
-TOKEN = os.environ.get("9279643241:AAFKOgeBc0nUaE93VjdkkQagFJzE7Za4i88")
+TOKEN = os.environ.get("TOKEN")
 CHAT_ID = 6194508570
 # ==========================
 
