@@ -1,149 +1,94 @@
-import os
+import os, time, requests
 import yfinance as yf
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import pandas as pd
 
-# ===== ISI PUNYA KAMU =====
 TOKEN = os.environ.get("TOKEN")
-CHAT_ID = 6194508570
-# ==========================
+CHAT_ID = "6194508570"
+SYMBOL = "GC=F"
 
-TICKER = "GC=F"  # XAUUSD
+last_signal_time = 0
+last_signal_level = 0
 
-def is_pinbar_m5(c):
-    # SYARAT 3: Pin Bar di M5
-    high, low, op, cl = float(c['High']), float(c['Low']), float(c['Open']), float(c['Close'])
-    body = abs(cl - op)
-    total = high - low
+def send_tele(pesan):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    try:
+        requests.post(url, data={"chat_id": CHAT_ID, "text": pesan, "parse_mode": "HTML"}, timeout=10)
+    except Exception as e:
+        print("Gagal kirim tele:", e)
+
+def ambil_data(tf, period="2d"):
+    df = yf.download(SYMBOL, interval=tf, period=period, progress=False, auto_adjust=False)
+    if df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df.dropna()
+    return df
+
+def is_pinbar(candle):
+    o, h, l, c = candle['Open'], candle['High'], candle['Low'], candle['Close']
+    body = abs(c - o)
+    upper = h - max(o, c)
+    lower = min(o, c) - l
+    total = h - l
     if total == 0:
-        return None
-    upper = high - max(cl, op)
-    lower = min(cl, op) - low
-    if body > total * 0.35:
-        return None
-    if upper > body * 2 and upper > total * 0.4:
-        return "Bearish Pin Bar M5 (sumbu atas panjang)"
-    if lower > body * 2 and lower > total * 0.4:
-        return "Bullish Pin Bar M5 (sumbu bawah panjang)"
+        return False
+    return (upper > body * 2 or lower > body * 2) and body < total * 0.4
+
+def is_engulfing(prev, curr):
+    if prev['Close'] < prev['Open'] and curr['Close'] > curr['Open']:
+        if curr['Open'] <= prev['Close'] and curr['Close'] >= prev['Open']:
+            return "BULLISH"
+    if prev['Close'] > prev['Open'] and curr['Close'] < curr['Open']:
+        if curr['Open'] >= prev['Close'] and curr['Close'] <= prev['Open']:
+            return "BEARISH"
     return None
 
-def is_engulfing_m5(prev, curr, arah):
-    # SYARAT 4: Engulfing di M5
-    po, pc = float(prev['Open']), float(prev['Close'])
-    co, cc = float(curr['Open']), float(curr['Close'])
-    if arah == "BUY":
-        return cc > co and pc < po and cc > po and co < pc
-    if arah == "SELL":
-        return cc < co and pc > po and cc < po and co > pc
-    return False
-
 def cek_sinyal():
-    df15 = yf.download(TICKER, period="2d", interval="15m", progress=False)
-    df5 = yf.download(TICKER, period="2d", interval="5m", progress=False)
-    if df15.empty or df5.empty or len(df15) < 20 or len(df5) < 20:
-        return None
+    global last_signal_time, last_signal_level
+    df15 = ambil_data("15m")
+    if df15 is None or len(df15) < 25:
+        return
+    # TEMBOK DINAMIS: High/Low dari 12 candle M15 terakhir, tembok pindah terus
+    data_tembok = df15.iloc[-21:-1]
+    tembok_high = float(data_tembok['High'].max())
+    tembok_low = float(data_tembok['Low'].min())
+    harga_skrg = float(df15.iloc[-1]['Close'])
+    print(f"Harga: {harga_skrg:.2f} | HIGH baru: {tembok_high:.2f} | LOW baru: {tembok_low:.2f}")
+    if time.time() - last_signal_time < 3600 and abs(harga_skrg - last_signal_level) < 5:
+        return
+    df5 = ambil_data("5m")
+    if df5 is None or len(df5) < 5:
+        return
+    c2 = df5.iloc[-2]
+    c3 = df5.iloc[-1]
+    toleransi = 2.0
+    # SELL - Gagal sentuh HIGH baru
+    if abs(float(c3['High']) - tembok_high) <= toleransi or (float(c3['High']) < tembok_high and float(c3['High']) > tembok_high - 3):
+        pin = is_pinbar(c2) or is_pinbar(c3)
+        eng = is_engulfing(c2, c3)
+        print(f"  -> Deket HIGH {tembok_high:.2f}, Pin:{pin}, Eng:{eng}")
+        if pin and eng == "BEARISH":
+            send_tele(f"🔴 <b>SELL XAUUSD</b>\n\n1. M15 High baru: {tembok_high:.2f}\n2. Gagal sentuh High\n3. Pin Bar M5 ✅\n4. Engulfing Bearish M5 ✅\n\nHarga: {harga_skrg:.2f}")
+            last_signal_time = time.time()
+            last_signal_level = tembok_high
+            return
+    # BUY - Gagal sentuh LOW baru
+    if abs(float(c3['Low']) - tembok_low) <= toleransi or (float(c3['Low']) > tembok_low and float(c3['Low']) < tembok_low + 3):
+        pin = is_pinbar(c2) or is_pinbar(c3)
+        eng = is_engulfing(c2, c3)
+        print(f"  -> Deket LOW {tembok_low:.2f}, Pin:{pin}, Eng:{eng}")
+        if pin and eng == "BULLISH":
+            send_tele(f"🟢 <b>BUY XAUUSD</b>\n\n1. M15 Low baru: {tembok_low:.2f}\n2. Gagal sentuh Low\n3. Pin Bar M5 ✅\n4. Engulfing Bullish M5 ✅\n\nHarga: {harga_skrg:.2f}")
+            last_signal_time = time.time()
+            last_signal_level = tembok_low
+            return
 
-    df15.columns = [c[0] if isinstance(c, tuple) else c for c in df15.columns]
-    df5.columns = [c[0] if isinstance(c, tuple) else c for c in df5.columns]
-
-    # SYARAT 1: High / Low M15 HARI INI
-    today = df15.index[-1].date()
-    df15_today = df15[df15.index.date == today]
-    high_m15 = float(df15_today['High'].max())
-    low_m15 = float(df15_today['Low'].min())
-    harga = float(df5.iloc[-1]['Close'])
-
-    dekat_high = abs(harga - high_m15) <= 3.0
-    dekat_low = abs(harga - low_m15) <= 3.0
-
-    arah = None
-    level = 0
-
-    # SYARAT 2: Gagal Sentuh 1-2 Candle M15
-    if dekat_high:
-        last2_high = float(df15.iloc[-2:]['High'].max())
-        if last2_high <= high_m15 + 0.5:
-            arah = "SELL"
-            level = high_m15
-    elif dekat_low:
-        last2_low = float(df15.iloc[-2:]['Low'].min())
-        if last2_low >= low_m15 - 0.5:
-            arah = "BUY"
-            level = low_m15
-
-    if not arah:
-        return None
-
-    # SYARAT 3 & 4: Pin Bar M5 + Engulfing M5
-    pin_ditemukan = None
-    eng_ditemukan = False
-
-    for i in range(len(df5)-3, len(df5)):
-        c = df5.iloc[i]
-        pin = is_pinbar_m5(c)
-        if pin:
-            pin_ditemukan = pin
-        if i > 0:
-            if is_engulfing_m5(df5.iloc[i-1], c, arah):
-                eng_ditemukan = True
-
-    if not pin_ditemukan or not eng_ditemukan:
-        return None
-
-    if arah == "SELL":
-        sl = high_m15 + 3
-        tp = harga - (sl - harga) * 2
-    else:
-        sl = low_m15 - 3
-        tp = harga + (harga - sl) * 2
-
-    pesan = (
-        f"🔔 SINYAL XAUUSD - 4 SYARAT TERPENUHI\n\n"
-        f"Arah: {arah}\n"
-        f"Harga: {harga:.2f}\n"
-        f"Level M15: {level:.2f}\n"
-        f"High M15: {high_m15:.2f}\n"
-        f"Low M15: {low_m15:.2f}\n\n"
-        f"✅ 1. Nyampe High/Low M15\n"
-        f"✅ 2. Gagal sentuh 1-2 candle M15\n"
-        f"✅ 3. {pin_ditemukan}\n"
-        f"✅ 4. Engulfing di M5 YA\n\n"
-        f"SL: {sl:.2f}\n"
-        f"TP: {tp:.2f} (RR 1:2)\n"
-        f"Lot: 0.01\n\n"
-        f"Cek lagi di MT5. Bukan jaminan profit."
-    )
-    return pesan
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot Scanner XAUUSD aktif.\nSyarat: High/Low M15 + Gagal Sentuh M15 + Pin Bar M5 + Engulfing M5.\nCek tiap 5 menit, tanpa RSI.")
-
-async def tes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Lagi ngecek chart...")
-    pesan = cek_sinyal()
-    if pesan:
-        await update.message.reply_text(pesan)
-    else:
-        await update.message.reply_text("Belum ada setup 4 syarat saat ini. Bot tetap mantau tiap 5 menit.")
-
-async def job_cek(context: ContextTypes.DEFAULT_TYPE):
+print("Bot jalan... Tembok M15 DINAMIS aktif...")
+send_tele("✅ Bot BARU jalan! Tembok High/Low sekarang pindah-pindah ngikutin M15 terdekat.")
+while True:
     try:
-        pesan = cek_sinyal()
-        if pesan:
-            await context.bot.send_message(chat_id=CHAT_ID, text=pesan)
-            print("Sinyal dikirim")
-        else:
-            print("Belum ada setup")
+        cek_sinyal()
     except Exception as e:
-        print(f"Error: {e}")
-
-def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("tes", tes))
-    app.job_queue.run_repeating(job_cek, interval=300, first=10)
-    print("Bot jalan...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+        print("Error:", e)
+    time.sleep(60)
